@@ -4,14 +4,12 @@ name: Compilar Tower Defense APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-
-permissions:
-  contents: read
+    branches:
+      - main
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Descargar codigo
@@ -32,22 +30,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip \
-            autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev \
-            libncursesw5-dev libtinfo6 \
-            cmake libffi-dev libssl-dev \
-            automake autopoint gettext
+            autoconf \
+            automake \
+            libtool \
+            libtool-bin \
+            pkg-config \
+            build-essential \
+            git \
+            zip \
+            unzip \
+            gettext \
+            autopoint \
+            cmake \
+            zlib1g-dev \
+            libncurses-dev \
+            libffi-dev \
+            libssl-dev
 
-      - name: Instalar Buildozer
+      - name: Preparar herramientas de compilacion
         run: |
+          libtoolize --version
+          autoreconf --version
           python -m pip install --upgrade pip
-          python -m pip install buildozer
+          python -m pip install "buildozer==1.6.0" "Cython==0.29.37"
 
-      - name: Intentar compilar APK
-        run: buildozer -v android debug
+      - name: Compilar APK
+        run: |
+          buildozer -v android debug
 
-      - name: Publicar APK
+      - name: Guardar APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
