@@ -1,0 +1,470 @@
+import math, os, random, sys, json
+import pygame
+
+os.environ["SDL_VIDEO_CENTERED"] = "1"
+pygame.init()
+pygame.font.init()
+
+ANCHO, ALTO = 562, 937
+pantalla = pygame.display.set_mode((ANCHO, ALTO), pygame.SCALED)
+pygame.display.set_caption("Tower Defense Avanzado")
+reloj = pygame.time.Clock()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+ARCHIVO_PARTIDA = os.path.join(BASE_DIR, "tower_defense_partida.json")
+ARCHIVO_RECORD = os.path.join(BASE_DIR, "tower_defense_record.json")
+
+NEGRO=(15,15,15); BLANCO=(255,255,255); GRIS=(60,60,60)
+GRIS_CLARO=(180,180,180); VERDE=(40,180,100); ROJO=(220,50,50)
+AZUL=(50,120,240); NARANJA=(240,130,30); MORADO=(160,50,200)
+VIOLETA=(115,55,210); NARANJA_ROJIZO=(205,65,25)
+AZUL_HIELO=(35,105,225); GRIS_METAL=(85,90,100)
+ROJO_OSCURO=(130,30,30)
+
+CAMINO=[(0,250),(437,250),(437,625),(62,625),(62,775),(562,775)]
+FUENTE=pygame.font.SysFont(None,22)
+FUENTE_P=pygame.font.SysFont(None,18)
+FUENTE_BIG=pygame.font.SysFont(None,28)
+FUENTE_TITULO=pygame.font.SysFont(None,42)
+
+DIFICULTADES={
+    "facil":{"nombre":"FACIL","vida":0.75,"velocidad":0.90,"dinero":450,"color":VERDE},
+    "normal":{"nombre":"NORMAL","vida":1.0,"velocidad":1.0,"dinero":350,"color":AZUL},
+    "dificil":{"nombre":"DIFICIL","vida":1.35,"velocidad":1.15,"dinero":300,"color":ROJO},
+}
+COSTOS={"normal":100,"hielo":150,"fuego":200,"electrica":250}
+COLORES_TORRES={"normal":GRIS_CLARO,"hielo":AZUL,"fuego":NARANJA,"electrica":VIOLETA}
+INMUNIDADES={
+    "inmune_fuego":{"color":NARANJA_ROJIZO,"nombre":"Inmune al fuego"},
+    "inmune_hielo":{"color":AZUL_HIELO,"nombre":"Inmune al hielo"},
+    "inmune_normal":{"color":GRIS_METAL,"nombre":"Inmune a torre normal"},
+    "inmune_electrica":{"color":VIOLETA,"nombre":"Inmune a electricidad"},
+}
+
+def texto_centrado(sup, texto, fuente, color, rect):
+    img=fuente.render(texto,True,color)
+    sup.blit(img,(rect.centerx-img.get_width()//2,rect.centery-img.get_height()//2))
+
+def boton(sup, rect, texto, color, texto_color=BLANCO, borde=0):
+    pygame.draw.rect(sup,color,rect,0,6)
+    if borde: pygame.draw.rect(sup,BLANCO,rect,borde,6)
+    texto_centrado(sup,texto,FUENTE,texto_color,rect)
+
+def icono_inmunidad(sup,tipo,x,y,escala=1):
+    x,y=int(x),int(y); b=BLANCO
+    if tipo=="inmune_fuego":
+        pts=[(x,y-int(9*escala)),(x+int(8*escala),y+int(1*escala)),
+             (x+int(5*escala),y+int(8*escala)),(x,y+int(10*escala)),
+             (x-int(6*escala),y+int(6*escala)),(x-int(7*escala),y+int(1*escala))]
+        pygame.draw.polygon(sup,b,pts)
+        pygame.draw.polygon(sup,(255,175,35),[(x,y-int(3*escala)),(x+int(3*escala),y+int(3*escala)),(x,y+int(7*escala)),(x-int(3*escala),y+int(3*escala))])
+    elif tipo=="inmune_hielo":
+        largo=8*escala
+        for ang in (0,60,120):
+            rad=math.radians(ang); dx=int(math.cos(rad)*largo); dy=int(math.sin(rad)*largo)
+            pygame.draw.line(sup,b,(x-dx,y-dy),(x+dx,y+dy),max(1,int(2*escala)))
+    elif tipo=="inmune_normal":
+        pygame.draw.circle(sup,b,(x,y),max(2,int(8*escala)),max(1,int(2*escala)))
+        pygame.draw.circle(sup,b,(x,y),max(1,int(3*escala)),max(1,int(2*escala)))
+        pygame.draw.line(sup,b,(x-int(11*escala),y),(x+int(11*escala),y),1)
+        pygame.draw.line(sup,b,(x,y-int(11*escala)),(x,y+int(11*escala)),1)
+    elif tipo=="inmune_electrica":
+        pts=[(x+int(2*escala),y-int(10*escala)),(x-int(6*escala),y+int(1*escala)),
+             (x-int(1*escala),y+int(1*escala)),(x-int(4*escala),y+int(10*escala)),
+             (x+int(7*escala),y-int(3*escala)),(x+int(1*escala),y-int(3*escala))]
+        pygame.draw.polygon(sup,b,pts)
+
+class Enemigo:
+    def __init__(self,tipo,mult,jefe=False,tipo_jefe=None,num_oleada=1,vel_mult=1.0,vida_dificultad=1.0):
+        self.tipo=tipo; self.jefe=jefe; self.tipo_jefe=tipo_jefe
+        self.camino_idx=0; self.x,self.y=CAMINO[0]
+        self.mult=mult; self.vel_mult=vel_mult
+        self.tiempo_hielo=0.0; self.tiempo_paralizado=0.0
+        self.tiempo_fuego=0.0; self.fuego_timer_tick=0.0
+        if jefe:
+            datos={
+                "coloso":(3000,0.70,MORADO,"COLOSO"),
+                "llamas":(4500,0.65,NARANJA,"SENOR DE LAS LLAMAS"),
+                "destructor":(6500,0.60,(225,45,55),"DESTRUCTOR"),
+            }
+            vida,vel,color,nombre=datos.get(tipo_jefe,datos["coloso"])
+            escala=1.0+max(0,num_oleada//10-1)*0.18
+            self.vida_max=vida*vida_dificultad*escala
+            self.vel_base=vel; self.color=color; self.nombre_jefe=nombre
+        elif tipo in INMUNIDADES:
+            self.vida_max=200*mult; self.vel_base=1.0
+            self.color=INMUNIDADES[tipo]["color"]; self.nombre_jefe=""
+        elif tipo=="normal":
+            self.vida_max=150*mult; self.vel_base=1.5; self.color=VERDE; self.nombre_jefe=""
+        elif tipo=="veloz":
+            self.vida_max=100*mult; self.vel_base=2.25; self.color=AZUL; self.nombre_jefe=""
+        else:
+            self.vida_max=200*mult; self.vel_base=1.0; self.color=ROJO; self.nombre_jefe=""
+        self.vida=self.vida_max
+
+    def actualizar(self,vel_juego):
+        vel=self.vel_base*self.vel_mult*vel_juego
+        if self.tiempo_paralizado>0:
+            self.tiempo_paralizado=max(0,self.tiempo_paralizado-(1/60)*vel_juego); vel=0
+        elif self.tiempo_hielo>0:
+            self.tiempo_hielo=max(0,self.tiempo_hielo-(1/60)*vel_juego); vel*=0.75
+        if self.tiempo_fuego>0:
+            self.tiempo_fuego=max(0,self.tiempo_fuego-(1/60)*vel_juego)
+            self.fuego_timer_tick+=vel_juego
+            while self.fuego_timer_tick>=30:
+                self.vida-=3.75; self.fuego_timer_tick-=30
+        if self.camino_idx<len(CAMINO)-1:
+            dx=CAMINO[self.camino_idx+1][0]-self.x
+            dy=CAMINO[self.camino_idx+1][1]-self.y
+            dist=math.hypot(dx,dy)
+            if dist<=vel or dist==0:
+                self.x,self.y=CAMINO[self.camino_idx+1]; self.camino_idx+=1
+            elif vel>0:
+                self.x+=(dx/dist)*vel; self.y+=(dy/dist)*vel
+            return True
+        return False
+
+    def dibujar(self,sup):
+        radio=22 if self.jefe else (16 if self.tipo in INMUNIDADES else 14)
+        pygame.draw.circle(sup,self.color,(int(self.x),int(self.y)),radio)
+        if self.tipo in INMUNIDADES:
+            icono_inmunidad(sup,self.tipo,self.x,self.y,1)
+            pygame.draw.circle(sup,BLANCO,(int(self.x),int(self.y)),radio,1)
+        ancho=30 if self.jefe else 26
+        pct=max(0,min(1,self.vida/self.vida_max))
+        pygame.draw.rect(sup,ROJO,(int(self.x)-ancho//2,int(self.y)-radio-10,ancho,5))
+        pygame.draw.rect(sup,VERDE,(int(self.x)-ancho//2,int(self.y)-radio-10,int(ancho*pct),5))
+        if self.jefe:
+            img=FUENTE_P.render(self.nombre_jefe,True,BLANCO)
+            sup.blit(img,(int(self.x)-img.get_width()//2,int(self.y)-radio-30))
+
+    def a_dict(self):
+        return {"tipo":self.tipo,"jefe":self.jefe,"tipo_jefe":self.tipo_jefe,"camino_idx":self.camino_idx,
+                "x":self.x,"y":self.y,"vida_max":self.vida_max,"vida":self.vida,"vel_base":self.vel_base,
+                "color":list(self.color),"mult":self.mult,"vel_mult":self.vel_mult,"tiempo_hielo":self.tiempo_hielo,
+                "tiempo_paralizado":self.tiempo_paralizado,"tiempo_fuego":self.tiempo_fuego,
+                "fuego_timer_tick":self.fuego_timer_tick,"nombre_jefe":getattr(self,"nombre_jefe","")}
+
+    @classmethod
+    def desde_dict(cls,d):
+        obj=cls(d["tipo"],d.get("mult",1),d.get("jefe",False),d.get("tipo_jefe"),
+                vel_mult=d.get("vel_mult",1))
+        obj.camino_idx=int(d.get("camino_idx",0)); obj.x=float(d.get("x",0)); obj.y=float(d.get("y",250))
+        obj.vida_max=float(d.get("vida_max",obj.vida_max)); obj.vida=float(d.get("vida",obj.vida))
+        obj.vel_base=float(d.get("vel_base",obj.vel_base)); obj.color=tuple(d.get("color",obj.color))
+        obj.tiempo_hielo=float(d.get("tiempo_hielo",0)); obj.tiempo_paralizado=float(d.get("tiempo_paralizado",0))
+        obj.tiempo_fuego=float(d.get("tiempo_fuego",0)); obj.fuego_timer_tick=float(d.get("fuego_timer_tick",0))
+        obj.nombre_jefe=d.get("nombre_jefe",getattr(obj,"nombre_jefe",""))
+        return obj
+
+class Torre:
+    def __init__(self,x,y,tipo):
+        self.x=int(x); self.y=int(y); self.tipo=tipo; self.nivel=1
+        self.rango=120 if tipo=="electrica" else 110
+        self.cooldown_max=int((0.60 if tipo=="electrica" else 0.50)*60); self.cooldown=0
+        self.costo_base=COSTOS[tipo]; self.invertido=self.costo_base
+        self.danio_base={"normal":25,"hielo":12.5,"fuego":37.5,"electrica":25}[tipo]
+        self.danio=self.danio_base; self.color=COLORES_TORRES[tipo]
+
+    def mejorar(self):
+        if self.nivel<5:
+            self.nivel+=1; self.rango+=15; self.danio=self.danio_base*self.nivel
+            self.invertido+=(self.nivel-1)*100
+
+    def puede_danar(self,e):
+        return not ((e.tipo=="inmune_fuego" and self.tipo=="fuego") or
+                    (e.tipo=="inmune_hielo" and self.tipo=="hielo") or
+                    (e.tipo=="inmune_normal" and self.tipo=="normal") or
+                    (e.tipo=="inmune_electrica" and self.tipo=="electrica"))
+
+    def atacar(self,enemigos,vel_juego):
+        if self.cooldown>0:
+            self.cooldown-=vel_juego; return
+        candidatos=[e for e in enemigos if e.vida>0 and self.puede_danar(e)
+                    and math.hypot(e.x-self.x,e.y-self.y)<=self.rango]
+        if not candidatos: return
+        objetivo=candidatos[0]
+        if self.tipo=="normal":
+            if self.nivel>=5 and random.random()<0.40:
+                for i in range(3):
+                    d=candidatos[i] if i<len(candidatos) else objetivo
+                    d.vida-=self.danio
+            else: objetivo.vida-=self.danio
+        elif self.tipo=="fuego":
+            objetivo.vida-=self.danio
+            if objetivo.tipo!="inmune_fuego":
+                objetivo.tiempo_fuego=2.0; objetivo.fuego_timer_tick=0
+            if self.nivel>=5 and random.random()<0.30:
+                for e in enemigos:
+                    if e is not objetivo and e.vida>0 and self.puede_danar(e) and math.hypot(e.x-objetivo.x,e.y-objetivo.y)<=65:
+                        e.vida-=self.danio*0.60
+        elif self.tipo=="hielo":
+            objetivo.vida-=self.danio
+            if objetivo.tipo!="inmune_hielo":
+                objetivo.tiempo_hielo=4.0
+                if self.nivel>=5 and random.random()<0.35:
+                    objetivo.tiempo_paralizado=max(objetivo.tiempo_paralizado,1.5)
+        else:
+            objetivo.vida-=self.danio
+            if self.nivel>=5 and random.random()<0.25:
+                for e in enemigos:
+                    if e.vida>0 and self.puede_danar(e) and math.hypot(e.x-objetivo.x,e.y-objetivo.y)<=100:
+                        e.vida-=60
+        self.cooldown=self.cooldown_max
+
+    def dibujar(self,sup):
+        pygame.draw.circle(sup,(40,40,40),(self.x,self.y),int(self.rango),1)
+        pygame.draw.circle(sup,self.color,(self.x,self.y),18)
+        pygame.draw.circle(sup,BLANCO,(self.x,self.y),18,2)
+        if self.tipo=="fuego":
+            pygame.draw.polygon(sup,(255,205,70),[(self.x,self.y-10),(self.x+7,self.y+2),(self.x,self.y+9),(self.x-6,self.y+2)])
+        elif self.tipo=="hielo": icono_inmunidad(sup,"inmune_hielo",self.x,self.y,0.75)
+        elif self.tipo=="electrica": icono_inmunidad(sup,"inmune_electrica",self.x,self.y,0.75)
+        else: pygame.draw.circle(sup,NEGRO,(self.x,self.y),6,2)
+
+    def a_dict(self):
+        return {"x":self.x,"y":self.y,"tipo":self.tipo,"nivel":self.nivel,"rango":self.rango,
+                "cooldown":self.cooldown,"invertido":self.invertido}
+
+    @classmethod
+    def desde_dict(cls,d):
+        obj=cls(d["x"],d["y"],d["tipo"]); obj.nivel=max(1,min(5,int(d.get("nivel",1))))
+        obj.rango=float(d.get("rango",obj.rango+15*(obj.nivel-1)))
+        obj.cooldown=float(d.get("cooldown",0)); obj.danio=obj.danio_base*obj.nivel
+        obj.invertido=int(d.get("invertido",obj.costo_base+sum(n*100 for n in range(1,obj.nivel))))
+        return obj
+
+dinero=350; vida_jugador=10; oleada=1; multiplicador_dificultad=1.0
+velocidad_juego=1; dificultad_actual="normal"; record_oleada=0
+enemigos=[]; torres=[]; enemigos_por_aparecer=[]; spawn_timer=0
+torre_seleccionada_mapa=None; tipo_seleccionado=None
+mensaje_temporal=""; mensaje_timer=0; modo="menu"; ejecutando=True
+
+rect_mejorar=pygame.Rect(18,78,160,40); rect_vender=pygame.Rect(384,78,160,40)
+rect_guardar=pygame.Rect(18,150,105,36); rect_cargar=pygame.Rect(132,150,105,36)
+rect_turbo=pygame.Rect(430,150,110,36)
+botones_torres=[
+    {"tipo":"normal","rect":pygame.Rect(7,850,132,60),"color":GRIS_CLARO},
+    {"tipo":"hielo","rect":pygame.Rect(145,850,132,60),"color":AZUL},
+    {"tipo":"fuego","rect":pygame.Rect(283,850,132,60),"color":NARANJA},
+    {"tipo":"electrica","rect":pygame.Rect(421,850,134,60),"color":VIOLETA},
+]
+btn_facil=pygame.Rect(40,310,145,65); btn_normal=pygame.Rect(208,310,145,65)
+btn_dificil=pygame.Rect(377,310,145,65); btn_continuar=pygame.Rect(95,430,372,62)
+btn_salir=pygame.Rect(95,515,372,52); btn_go_menu=pygame.Rect(95,490,372,55)
+btn_go_reintentar=pygame.Rect(95,565,372,55)
+
+def mensaje(texto,frames=180):
+    global mensaje_temporal,mensaje_timer
+    mensaje_temporal=texto; mensaje_timer=frames
+
+def cargar_record():
+    global record_oleada
+    try:
+        with open(ARCHIVO_RECORD,"r",encoding="utf-8") as f: record_oleada=int(json.load(f).get("oleada_maxima",0))
+    except (OSError,ValueError,TypeError,json.JSONDecodeError): record_oleada=0
+
+def actualizar_record():
+    global record_oleada
+    if oleada>record_oleada:
+        record_oleada=oleada
+        try:
+            with open(ARCHIVO_RECORD,"w",encoding="utf-8") as f: json.dump({"oleada_maxima":record_oleada},f)
+        except OSError: mensaje("No se pudo guardar el record")
+
+def generar_oleada(n):
+    global multiplicador_dificultad
+    ajuste=DIFICULTADES[dificultad_actual]
+    multiplicador_dificultad=(1.0+((n-1)//5)*0.50)*ajuste["vida"]
+    lista=[]; cantidad=5+n*2
+    if n%10==0:
+        tipo_jefe="coloso" if n==10 else ("llamas" if n==20 else "destructor")
+        lista.append(Enemigo("tanque",multiplicador_dificultad,True,tipo_jefe,n,
+                             ajuste["velocidad"],ajuste["vida"]))
+        cantidad-=1
+    for _ in range(cantidad):
+        tipo=random.choice(list(INMUNIDADES)) if n>15 and random.random()<0.25 else random.choice(["normal","veloz","tanque"])
+        lista.append(Enemigo(tipo,multiplicador_dificultad,vel_mult=ajuste["velocidad"]))
+    return lista
+
+def iniciar_partida(dificultad):
+    global dinero,vida_jugador,oleada,multiplicador_dificultad,velocidad_juego,dificultad_actual
+    global enemigos,torres,enemigos_por_aparecer,spawn_timer,torre_seleccionada_mapa,tipo_seleccionado,modo
+    dificultad_actual=dificultad; dinero=DIFICULTADES[dificultad]["dinero"]; vida_jugador=10; oleada=1
+    velocidad_juego=1; enemigos=[]; torres=[]; spawn_timer=0
+    torre_seleccionada_mapa=None; tipo_seleccionado=None
+    enemigos_por_aparecer=generar_oleada(oleada); actualizar_record(); modo="juego"
+
+def guardar_partida(mostrar=True):
+    datos={"version":1,"dinero":dinero,"vida_jugador":vida_jugador,"oleada":oleada,
+           "dificultad_actual":dificultad_actual,"velocidad_juego":velocidad_juego,
+           "multiplicador_dificultad":multiplicador_dificultad,"spawn_timer":spawn_timer,
+           "torres":[t.a_dict() for t in torres],"enemigos":[e.a_dict() for e in enemigos],
+           "enemigos_por_aparecer":[e.a_dict() for e in enemigos_por_aparecer]}
+    try:
+        with open(ARCHIVO_PARTIDA,"w",encoding="utf-8") as f: json.dump(datos,f,ensure_ascii=False,indent=2)
+        if mostrar: mensaje("Partida guardada")
+        return True
+    except (OSError,TypeError,ValueError):
+        if mostrar: mensaje("Error al guardar")
+        return False
+
+def cargar_partida(mostrar=True):
+    global dinero,vida_jugador,oleada,dificultad_actual,velocidad_juego,multiplicador_dificultad
+    global spawn_timer,torres,enemigos,enemigos_por_aparecer,torre_seleccionada_mapa,tipo_seleccionado,modo
+    try:
+        with open(ARCHIVO_PARTIDA,"r",encoding="utf-8") as f: d=json.load(f)
+        dificultad=d.get("dificultad_actual","normal")
+        if dificultad not in DIFICULTADES: dificultad="normal"
+        dificultad_actual=dificultad; dinero=int(d.get("dinero",350)); vida_jugador=int(d.get("vida_jugador",10))
+        oleada=max(1,int(d.get("oleada",1))); velocidad_juego=int(d.get("velocidad_juego",1))
+        if velocidad_juego not in (1,2): velocidad_juego=1
+        multiplicador_dificultad=float(d.get("multiplicador_dificultad",1))
+        spawn_timer=float(d.get("spawn_timer",0))
+        torres=[Torre.desde_dict(t) for t in d.get("torres",[])]
+        enemigos=[Enemigo.desde_dict(e) for e in d.get("enemigos",[])]
+        enemigos_por_aparecer=[Enemigo.desde_dict(e) for e in d.get("enemigos_por_aparecer",[])]
+        torre_seleccionada_mapa=None; tipo_seleccionado=None; modo="juego"; actualizar_record()
+        if mostrar: mensaje("Partida cargada")
+        return True
+    except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError):
+        if mostrar: mensaje("No hay una partida valida")
+        return False
+
+def dibujar_menu():
+    pantalla.fill(NEGRO)
+    t=FUENTE_TITULO.render("TOWER DEFENSE",True,BLANCO); pantalla.blit(t,(ANCHO//2-t.get_width()//2,115))
+    s=FUENTE_BIG.render("Elegi la dificultad",True,GRIS_CLARO); pantalla.blit(s,(ANCHO//2-s.get_width()//2,215))
+    boton(pantalla,btn_facil,"FACIL",VERDE); boton(pantalla,btn_normal,"NORMAL",AZUL); boton(pantalla,btn_dificil,"DIFICIL",ROJO)
+    r=FUENTE_BIG.render(f"Record maximo: oleada {record_oleada}",True,BLANCO); pantalla.blit(r,(ANCHO//2-r.get_width()//2,395))
+    if os.path.exists(ARCHIVO_PARTIDA): boton(pantalla,btn_continuar,"CONTINUAR PARTIDA GUARDADA",(80,90,100))
+    else: boton(pantalla,btn_continuar,"NO HAY PARTIDA GUARDADA",(45,45,45),GRIS_CLARO)
+    boton(pantalla,btn_salir,"SALIR",GRIS)
+    ayuda=FUENTE_P.render("El record se guarda automaticamente.",True,GRIS_CLARO)
+    pantalla.blit(ayuda,(ANCHO//2-ayuda.get_width()//2,620))
+
+def dibujar_gameover():
+    capa=pygame.Surface((ANCHO,ALTO)); capa.set_alpha(220); capa.fill(NEGRO); pantalla.blit(capa,(0,0))
+    for txt,y,col,fuente in [("GAME OVER",340,ROJO,FUENTE_TITULO),(f"Llegaste a la oleada {oleada}",400,BLANCO,FUENTE_BIG),(f"Record maximo: oleada {record_oleada}",440,GRIS_CLARO,FUENTE)]:
+        img=fuente.render(txt,True,col); pantalla.blit(img,(ANCHO//2-img.get_width()//2,y))
+    boton(pantalla,btn_go_menu,"VOLVER AL MENU",GRIS); boton(pantalla,btn_go_reintentar,"REINTENTAR",VERDE)
+
+cargar_record()
+
+while ejecutando:
+    reloj.tick(60); pos_mouse=pygame.mouse.get_pos()
+    for evento in pygame.event.get():
+        if evento.type==pygame.QUIT:
+            if modo=="juego" and vida_jugador>0: guardar_partida(False)
+            ejecutando=False
+        if evento.type==pygame.MOUSEBUTTONDOWN:
+            p=evento.pos
+            if modo=="menu":
+                if btn_facil.collidepoint(p): iniciar_partida("facil")
+                elif btn_normal.collidepoint(p): iniciar_partida("normal")
+                elif btn_dificil.collidepoint(p): iniciar_partida("dificil")
+                elif btn_continuar.collidepoint(p) and os.path.exists(ARCHIVO_PARTIDA): cargar_partida()
+                elif btn_salir.collidepoint(p): ejecutando=False
+            elif modo=="gameover":
+                if btn_go_menu.collidepoint(p): modo="menu"
+                elif btn_go_reintentar.collidepoint(p): iniciar_partida(dificultad_actual)
+            elif modo=="juego":
+                if rect_turbo.collidepoint(p):
+                    velocidad_juego=2 if velocidad_juego==1 else 1; continue
+                if rect_guardar.collidepoint(p): guardar_partida(); continue
+                if rect_cargar.collidepoint(p): cargar_partida(); continue
+                if torre_seleccionada_mapa and torre_seleccionada_mapa.nivel<5 and rect_mejorar.collidepoint(p):
+                    costo=torre_seleccionada_mapa.nivel*100
+                    if dinero>=costo:
+                        dinero-=costo; torre_seleccionada_mapa.mejorar(); mensaje("Torre mejorada")
+                    else: mensaje("No tenes suficiente oro")
+                    continue
+                if torre_seleccionada_mapa and rect_vender.collidepoint(p):
+                    reembolso=int(torre_seleccionada_mapa.invertido*0.5); dinero+=reembolso
+                    if torre_seleccionada_mapa in torres: torres.remove(torre_seleccionada_mapa)
+                    torre_seleccionada_mapa=None; tipo_seleccionado=None; mensaje(f"Torre vendida: +${reembolso}")
+                    continue
+                tocado=False
+                for b in botones_torres:
+                    if b["rect"].collidepoint(p):
+                        if dinero>=COSTOS[b["tipo"]]: tipo_seleccionado=b["tipo"]; torre_seleccionada_mapa=None
+                        else: mensaje("No tenes suficiente oro")
+                        tocado=True; break
+                if tocado: continue
+                x,y=p
+                if 210<=y<830:
+                    tocada=next((t for t in torres if math.hypot(t.x-x,t.y-y)<25),None)
+                    if tocada: torre_seleccionada_mapa=tocada; tipo_seleccionado=None
+                    elif tipo_seleccionado:
+                        if not any(math.hypot(t.x-x,t.y-y)<30 for t in torres):
+                            torres.append(Torre(x,y,tipo_seleccionado)); dinero-=COSTOS[tipo_seleccionado]; tipo_seleccionado=None
+                        else: mensaje("No coloques torres tan juntas")
+                    else: torre_seleccionada_mapa=None
+
+    if not ejecutando: break
+
+    if modo=="juego" and vida_jugador>0:
+        if enemigos_por_aparecer:
+            spawn_timer+=velocidad_juego
+            if spawn_timer>=45: enemigos.append(enemigos_por_aparecer.pop(0)); spawn_timer=0
+        for t in torres: t.atacar(enemigos,velocidad_juego)
+        for e in enemigos[:]:
+            if e.vida<=0:
+                dinero+=150 if e.jefe else (35 if e.tipo in INMUNIDADES else 25); enemigos.remove(e); continue
+            sigue=e.actualizar(velocidad_juego)
+            if e.vida<=0:
+                dinero+=150 if e.jefe else (35 if e.tipo in INMUNIDADES else 25); enemigos.remove(e); continue
+            if not sigue: vida_jugador-=1; enemigos.remove(e)
+        if not enemigos and not enemigos_por_aparecer and vida_jugador>0:
+            oleada+=1; enemigos_por_aparecer=generar_oleada(oleada); actualizar_record()
+            guardar_partida(False)
+    if modo=="juego" and vida_jugador<=0:
+        actualizar_record(); modo="gameover"
+    if mensaje_timer>0: mensaje_timer-=1
+
+    if modo=="menu":
+        dibujar_menu()
+        if mensaje_timer>0 and mensaje_temporal:
+            img=FUENTE.render(mensaje_temporal,True,BLANCO); pantalla.blit(img,(ANCHO//2-img.get_width()//2,690))
+    else:
+        pantalla.fill(NEGRO); pygame.draw.lines(pantalla,GRIS,False,CAMINO,35)
+        for t in torres:
+            t.dibujar(pantalla)
+            if t==torre_seleccionada_mapa: pygame.draw.circle(pantalla,BLANCO,(t.x,t.y),int(t.rango),2)
+        if tipo_seleccionado and 210<=pos_mouse[1]<830:
+            pygame.draw.circle(pantalla,(100,100,100),pos_mouse,110,1)
+            pygame.draw.circle(pantalla,COLORES_TORRES[tipo_seleccionado],pos_mouse,18,2)
+        for e in enemigos: e.dibujar(pantalla)
+        pygame.draw.rect(pantalla,(25,25,25),(0,830,ANCHO,110)); pygame.draw.line(pantalla,GRIS_CLARO,(0,830),(ANCHO,830),2)
+        for txt,pos,col in [(f"Vidas: {vida_jugador}",(18,12),ROJO),(f"Oro: ${dinero}",(190,12),VERDE),(f"Oleada: {oleada}",(390,12),BLANCO)]:
+            pantalla.blit(FUENTE_BIG.render(txt,True,col),pos)
+        aj=DIFICULTADES[dificultad_actual]
+        pantalla.blit(FUENTE.render(f"Dificultad: {aj['nombre']} | Vida enemigos x{multiplicador_dificultad:.2f}",True,GRIS_CLARO),(18,44))
+        pantalla.blit(FUENTE_P.render(f"Record: {record_oleada}",True,BLANCO),(420,48))
+        if torre_seleccionada_mapa:
+            costo=torre_seleccionada_mapa.nivel*100
+            boton(pantalla,rect_mejorar,f"MEJORAR ${costo}" if torre_seleccionada_mapa.nivel<5 else "NIVEL MAX. 5",
+                  VERDE if torre_seleccionada_mapa.nivel<5 and dinero>=costo else GRIS)
+            boton(pantalla,rect_vender,"VENDER 50%",ROJO_OSCURO)
+            info=FUENTE.render(f"{torre_seleccionada_mapa.tipo.upper()} | Nivel {torre_seleccionada_mapa.nivel} | Dano {torre_seleccionada_mapa.danio:.1f}",True,BLANCO)
+            pantalla.blit(info,(18,123))
+        else:
+            boton(pantalla,rect_mejorar,"MEJORAR",GRIS); boton(pantalla,rect_vender,"VENDER",GRIS)
+        boton(pantalla,rect_guardar,"GUARDAR",(45,100,65)); boton(pantalla,rect_cargar,"CARGAR",(70,75,100))
+        boton(pantalla,rect_turbo,"TURBO 2X" if velocidad_juego==2 else "VELOCIDAD 1X",VERDE if velocidad_juego==2 else GRIS)
+        nombres={"normal":"Normal","hielo":"Hielo","fuego":"Fuego","electrica":"Electrica"}
+        for b in botones_torres:
+            sel=tipo_seleccionado==b["tipo"]
+            pygame.draw.rect(pantalla,b["color"],b["rect"],4 if sel else 0,4)
+            tc=BLANCO if sel else NEGRO
+            img1=FUENTE_P.render(nombres[b["tipo"]],True,tc); img2=FUENTE.render(f"${COSTOS[b['tipo']]}",True,tc)
+            pantalla.blit(img1,(b["rect"].centerx-img1.get_width()//2,b["rect"].y+9))
+            pantalla.blit(img2,(b["rect"].centerx-img2.get_width()//2,b["rect"].y+31))
+        if mensaje_timer>0 and mensaje_temporal:
+            caja=pygame.Rect(80,205,ANCHO-160,30); pygame.draw.rect(pantalla,(35,35,35),caja,0,5)
+            img=FUENTE.render(mensaje_temporal,True,BLANCO); pantalla.blit(img,(caja.centerx-img.get_width()//2,caja.y+7))
+        if modo=="gameover": dibujar_gameover()
+    pygame.display.flip()
+
+pygame.quit()
+sys.exit()
